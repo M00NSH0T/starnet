@@ -9291,6 +9291,8 @@ const ROUTES = [
   { m: 'GET', exact: '/api/stockblitz/board', h: handleStockBlitzBoard },   // StockBlitz fork: read-only work-board feed
   { m: 'GET', exact: '/api/stockblitz/globe', h: handleStockBlitzGlobe },   // StockBlitz fork: compact world-twin data for the bridge hologram
   { m: 'POST', exact: '/api/stockblitz/lane', h: handleStockBlitzLane },   // StockBlitz fork: pause/resume/priority/agent-now for one lane
+  { m: 'POST', exact: '/api/stockblitz/ask', h: handleStockBlitzAsk },     // StockBlitz fork: "Ask the crew" → a Claude Code agent via the watchdog
+  { m: 'GET', exact: '/api/stockblitz/asks', h: handleStockBlitzAsks },    // StockBlitz fork: recent asks and their replies
   { m: 'GET', exact: '/api/diagnostics', h: handleDiagnostics },   // T3.9 paste-ready bug report
   { m: 'POST', exact: '/api/diagnostics/live', h: handleLiveDoctor }, // opt-in live model/execution/MCP/channel proof
   { m: 'POST', exact: '/api/halt', h: handleHalt },
@@ -18847,6 +18849,41 @@ async function handleStockBlitzLane(req, res) {
   } catch (e) {
     return json(502, { ok: false, error: 'StockBlitz board unreachable' });
   }
+}
+
+// POST /api/stockblitz/ask {text} and GET /api/stockblitz/asks — StockBlitz fork: "Ask the crew".
+// The dashboard queues the ask and the StockBlitz watchdog hands it to a Claude Code agent on the
+// owner's plan; the reply comes back through /api/asks. Both dashboard routes are local-only.
+async function handleStockBlitzAsk(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body;
+  try { body = JSON.parse(await readBody(req, 1 << 15) || '{}') || {}; }
+  catch (_) { return json(400, { ok: false, error: 'bad json' }); }
+  const text = String(body.text || '').trim();
+  if (!text) return json(400, { ok: false, error: 'Type a question or request first.' });
+  try {
+    const r = await fetch(STOCKBLITZ_BOARD_URL, {
+      method: 'POST', signal: AbortSignal.timeout(8000),
+      headers: { 'Content-Type': 'application/json', Origin: new URL(STOCKBLITZ_BOARD_URL).origin },
+      body: JSON.stringify({ ask: text }),
+    });
+    const out = await r.json().catch(() => ({}));
+    if (!r.ok) return json(502, { ok: false, error: out.error || ('board refused (' + r.status + ')') });
+    return json(200, { ok: true, ask: out });
+  } catch (e) {
+    return json(502, { ok: false, error: 'StockBlitz board unreachable' });
+  }
+}
+async function handleStockBlitzAsks(req, res) {
+  let out;
+  try {
+    const r = await fetch(new URL(STOCKBLITZ_BOARD_URL).origin + '/api/asks', { signal: AbortSignal.timeout(5000), cache: 'no-store' });
+    out = r.ok ? { ok: true, ...(await r.json()) } : { ok: false, error: 'board refused (' + r.status + ')' };
+  } catch (e) {
+    out = { ok: false, error: 'StockBlitz board unreachable' };
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(out));
 }
 
 function handleVersion(req, res) {

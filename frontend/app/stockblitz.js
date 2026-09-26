@@ -1,10 +1,11 @@
-/* stockblitz.js — StockBlitz fork: show the StockBlitz work board as display-only crew.
+/* stockblitz.js — StockBlitz fork: the StockBlitz work board as crew on the station.
 
-   Read-only. Polls the sidecar's /api/stockblitz/board (which reads the local StockBlitz dashboard) and
-   gives each working or ready lane a body on the floor via World.spawnAgent — never App.summonAgent, so
-   these bodies are not roster agents: no system prompt, no model, nothing persisted to the save or roster.
-   A small HUD lists the watchdog and what each working lane is doing. Nothing here can start, stop or
-   edit StockBlitz work. */
+   Polls the sidecar's /api/stockblitz/board (which reads the local StockBlitz dashboard) and gives each
+   working or ready lane a body on the floor via World.spawnAgent — never App.summonAgent, so these bodies
+   are not StarNet roster agents: no system prompt, no model, nothing persisted to the save or roster.
+   Clicking one opens its lane (pause, priority, put an agent on it), and "Ask the crew" queues free text
+   for a Claude Code agent. All of it goes through the dashboard's own board API, which the StockBlitz
+   watchdog acts on; the station itself runs no agents. */
 (() => {
   'use strict';
   const POLL_MS = 5000;
@@ -44,7 +45,7 @@
     if (hud) return hud;
     const style = el('style');
     style.textContent = [
-      '#sb-hud{position:fixed;right:14px;bottom:14px;z-index:950;width:min(330px,calc(100vw - 28px));max-height:46vh;overflow:auto;',
+      '#sb-hud{position:fixed;right:14px;bottom:14px;z-index:950;width:min(340px,calc(100vw - 28px));max-height:72vh;overflow:auto;',
       'background:rgba(12,9,4,.88);border:1px solid #c98a2b;color:#f3d9a4;font:11px/1.45 ui-monospace,Consolas,monospace;padding:10px 12px;',
       'box-shadow:0 0 18px rgba(201,138,43,.25)}',
       '#sb-hud h4{margin:0 0 6px;font:700 11px ui-monospace,Consolas,monospace;letter-spacing:.14em;color:#ffb547}',
@@ -62,6 +63,16 @@
       'background:#1a1206;color:#ffb547;font:700 11px ui-monospace,Consolas,monospace;letter-spacing:.12em;user-select:none}',
       '#sb-term .sb-bar button{background:none;border:1px solid #6b4d1c;color:#f3d9a4;font:inherit;cursor:pointer;min-width:28px}',
       '#sb-term iframe{flex:1;border:0;width:100%;background:#101419}#sb-term[hidden]{display:none}',
+      '#sb-hud .sb-ask{margin:8px 0;display:flex;flex-direction:column;gap:4px}',
+      '#sb-hud .sb-ask label{color:#ffb547;letter-spacing:.14em;font-weight:700}',
+      '#sb-hud textarea{background:#140e05;color:#fff3d6;border:1px solid #6b4d1c;font:inherit;padding:4px 6px;resize:vertical}',
+      '#sb-hud .sb-ask>button{align-self:flex-start;padding:3px 8px;border-color:#c98a2b}',
+      '#sb-hud .sb-askrow{display:block;width:100%;text-align:left;margin-top:3px;padding:3px 6px}#sb-hud .sb-askrow small{display:block;color:#9c865e}',
+      '#sb-reader{position:fixed;left:50%;top:10vh;transform:translateX(-50%);z-index:965;width:min(640px,92vw);max-height:76vh;overflow:auto;',
+      'background:rgba(12,9,4,.97);border:1px solid #c98a2b;color:#f3d9a4;font:12px/1.5 ui-monospace,Consolas,monospace;padding:12px 16px}',
+      '#sb-reader[hidden]{display:none}#sb-reader h4{margin:10px 0 4px;color:#ffb547;letter-spacing:.12em}',
+      '#sb-reader pre{white-space:pre-wrap;margin:0;color:#fff3d6;font:inherit}',
+      '#sb-reader>button{float:right;background:none;border:1px solid #6b4d1c;color:#f3d9a4;font:inherit;cursor:pointer;min-width:28px}',
     ].join('');
     document.head.appendChild(style);
     hud = el('div');
@@ -90,7 +101,7 @@
     });
     const dash = el('a', 'sb-dash', 'Dashboard view');
     dash.href = DASHBOARD;
-    body.append(decks, el('div', 'sb-live'), dash);
+    body.append(buildAsk(), decks, el('div', 'sb-live'), dash);
     toggle.onclick = () => {
       body.hidden = !body.hidden;
       toggle.textContent = body.hidden ? '+' : '–';
@@ -128,6 +139,93 @@
       live.append(row);
     });
     if (wd.nextAction) live.append(el('div', 'sb-dim', 'last: ' + wd.nextAction));
+  }
+
+  // ---- Ask the crew: free text to a Claude Code agent through the StockBlitz watchdog ----
+  const ASK_STATUS = { queued: 'waiting for a free agent', running: 'agent working', done: 'answered', failed: 'failed' };
+  let askList = null;
+  let asks = [];
+
+  function apiHeaders(json) {
+    const h = json ? { 'Content-Type': 'application/json' } : {};
+    const tok = token();
+    if (tok) h['X-StarNet-Token'] = tok;
+    return h;
+  }
+
+  function buildAsk() {
+    const wrap = el('div', 'sb-ask');
+    const label = el('label', null, 'ASK THE CREW');
+    label.htmlFor = 'sb-ask-text';
+    const text = el('textarea');
+    text.id = 'sb-ask-text';
+    text.rows = 2;
+    text.placeholder = 'e.g. Which research lanes are blocked, and why?';
+    const send = el('button', null, 'Send to the crew');
+    const msg = el('div', 'sb-dim');
+    send.onclick = async () => {
+      const value = text.value.trim();
+      if (!value) { msg.textContent = 'Type a question or request first.'; return; }
+      send.disabled = true;
+      msg.textContent = 'Sending…';
+      try {
+        const r = await fetch('/api/stockblitz/ask', { method: 'POST', headers: apiHeaders(true), body: JSON.stringify({ text: value }) });
+        const body = await r.json().catch(() => ({}));
+        if (!body.ok) throw new Error(body.error || 'the board refused');
+        text.value = '';
+        msg.textContent = 'Queued. A Claude Code agent picks it up within two minutes.';
+        pollAsks();
+      } catch (e) {
+        msg.textContent = e.message;
+      } finally {
+        send.disabled = false;
+      }
+    };
+    text.addEventListener('keydown', e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) send.click(); });
+    askList = el('div', 'sb-asks');
+    wrap.append(label, text, send, msg, askList);
+    return wrap;
+  }
+
+  function renderAsks() {
+    if (!askList) return;
+    askList.replaceChildren();
+    asks.slice(0, 4).forEach(a => {
+      const row = el('button', 'sb-askrow');
+      row.append(el('span', 'sb-name', a.text.length > 60 ? a.text.slice(0, 59) + '…' : a.text));
+      row.append(el('small', null, ASK_STATUS[a.status] || a.status));
+      row.onclick = () => openAnswer(a);
+      askList.append(row);
+    });
+  }
+
+  async function pollAsks() {
+    try {
+      const r = await fetch('/api/stockblitz/asks', { headers: apiHeaders(false), cache: 'no-store' });
+      const body = await r.json();
+      if (body.ok) { asks = body.asks || []; renderAsks(); }
+    } catch (_) { /* the HUD summary already reports an unreachable board */ }
+  }
+
+  let reader = null;
+  function openAnswer(a) {
+    if (!reader) {
+      reader = el('div');
+      reader.id = 'sb-reader';
+      reader.setAttribute('role', 'dialog');
+      document.body.appendChild(reader);
+      document.addEventListener('keydown', e => { if (e.key === 'Escape' && reader && !reader.hidden) reader.hidden = true; });
+    }
+    reader.replaceChildren();
+    const close = el('button', null, '×');
+    close.setAttribute('aria-label', 'Close reply');
+    close.onclick = () => { reader.hidden = true; };
+    reader.append(close, el('h4', null, 'YOU ASKED'), el('p', null, a.text));
+    reader.append(el('h4', null, 'CREW REPLY · ' + (ASK_STATUS[a.status] || a.status).toUpperCase()));
+    const pre = el('pre', null, a.answer || (a.status === 'done' || a.status === 'failed' ? '(no reply was saved)' : 'Not answered yet. This updates when the agent finishes.'));
+    reader.append(pre);
+    if (a.answer_truncated) reader.append(el('p', 'sb-dim', 'Reply shortened here; the full text is in outputs/task_watchdog/owner_asks/' + a.id + '.answer.md'));
+    reader.hidden = false;
   }
 
   // A station terminal showing one live dashboard section (the dashboard's ?embed=1 hides its own chrome).
@@ -317,7 +415,9 @@
     // app.js wires these props during boot; re-bind after it so ours win.
     [1500, 5000, 12000].forEach(ms => setTimeout(bindProps, ms));
     poll();
+    pollAsks();
     setInterval(() => { if (!document.hidden) poll(); }, POLL_MS);
+    setInterval(() => { if (!document.hidden) pollAsks(); }, 10000);
   }
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
   else start();
