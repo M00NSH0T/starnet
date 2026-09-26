@@ -1472,9 +1472,12 @@ const World = (() => {
       const hit = agentHit(wp);
       if (hit) {
         if (hit === agent && activity !== 'task') { agent.dir = 'south'; setGlance('south', 1000, performance.now()); curiositySay(SELF_GREET, 0.8, performance.now()); }   // eye contact for the Commander
-        if (onClick) onClick(hit.agentId || hit.id);
+        const hitId = hit.agentId || hit.id;
+        if (overlayClick && overlayClick({ agentId: hitId, wp }, overlayEnv(performance.now()))) return;   // StockBlitz fork: display-only crew open their lane
+        if (onClick) onClick(hitId);
         return;
       }
+      if (overlayClick && overlayClick({ wp }, overlayEnv(performance.now()))) return;   // StockBlitz fork: the globe hologram
       const arc = arcadeAt(wp);
       if (arc && onArcade) { onArcade(arc); return; }
       // G2.3: a stacked OUTBOX is the collect tap — clicking it opens the oldest pending run's review
@@ -6504,6 +6507,11 @@ const World = (() => {
     };
     if (agent && !agent.unplaced) items.push(bodyItem(agent, rposY()));
     for (const b of crew) items.push(bodyItem(b, (b.seated ? b.seatPy : b.py)));   // the other agents, at their bays (seated → sort by the cushion pos like the hero's rposY, so a couch-lounging crew body tucks just behind the back-facing couch panel, head over the cap)
+    // StockBlitz fork: extension overlays (the bridge globe hologram) depth-sort with props and bodies.
+    if (overlayItems && geo) {
+      try { for (const it of overlayItems(overlayEnv(now)) || []) if (it && typeof it.draw === 'function') items.push({ y: +it.y || 0, draw: () => it.draw(ctx) }); }
+      catch (e) { if (!overlayWarned) { overlayWarned = true; console.warn('[world] overlay failed', e); } }
+    }
     // A raised doorway stands in front of a body until its feet clear the wall.
     // Use the baked surfaces in the same depth order as props and agents; leaving
     // them only in baseCv made every body paint through the solid jambs.
@@ -7758,6 +7766,23 @@ const World = (() => {
   }
 
   function setOnClick(fn) { onClick = fn; }
+  /* StockBlitz fork: a small extension seam so an outside module can draw into the world (depth-sorted
+     with props and bodies, under the lightmap/bloom/CRT) and claim clicks. env gives the tile size, the
+     room zones in world pixels, and the camera, so overlays never need world.js internals. */
+  let overlayItems = null, overlayClick = null, overlayWarned = false;
+  function overlayEnv(now) {
+    const rooms = [];
+    if (geo && geo.zones) {
+      for (const id of (geo.ROOM_IDS || Object.keys(geo.zones))) {
+        const z = geo.zones[id];
+        if (!z) continue;
+        rooms.push({ id, kind: geo.kindOf ? geo.kindOf(id) : null, name: geo.nameOf ? geo.nameOf(id) : id,
+          x1: z.x1 * T, y1: z.y1 * T, x2: (z.x2 + 1) * T, y2: (z.y2 + 1) * T });
+      }
+    }
+    return { now, T, scale, panX, panY, rooms, reduceMotion: reduceMotion() };
+  }
+  function setOverlay(items, click) { overlayItems = items || null; overlayClick = click || null; overlayWarned = false; }
   function setOnArcade(fn) { onArcade = fn; }
   function setOnOutbox(fn) { onOutbox = fn; }
   function setOnBayAssign(fn) { onBayAssign = fn; }   // click an UNBOUND bay → open the assign flow (app wires to REFIT's picker)
@@ -10090,7 +10115,7 @@ const World = (() => {
       const errors = (routingPlan && routingPlan.errors ? routingPlan.errors : []).filter(e => !e.warn);
       return planPoster.flush().then(s => Object.assign({ errors: errors, hash: routingPlan ? routingPlan.hash : null }, s));
     },
-    loadStation, spawn, spawnAgent, despawnAgent, setSkin, relabel, setActivityFor, agentRunsLive, dropRun: noteRunEnd, focusBody, lockBody, cameraMode, setCinecamIdle, setChatFocus, chatFocusPing, start, stop, setActivity, wakeIn, beginAwakening, playArrival, cancelArrival, setWakeProgress, igniteSpark, armKindle, kindleHold, camPushIn, camCreep, camPunch, camPullBack, awakenTurn, truthPulse, beginFlood, collapseFlood, endAwakening, releaseAwakening, say, focusAgent, getActivity: () => activity, getUse: () => (agent ? agent.usingProp : null), setOnClick, setOnArcade, setOnOutbox, setOnMissionBoard, setOnTrophyCase, setOnBayAssign, setOnIntakeFeed, setOnIntakeSample, refit, pauseBridge, resumeBridge, linkState, _dbgSeedRun, _dbgAgeRun, _dbgReconcile, _dbgSweep, _dbgLinkState, _dbgDropBridge, _dbgCurveState, _dbgLoseCurveContext, _dbgLoseCanvases, _dbgCanvasLoss, _dbgKillStageContext, _dbgStageState, _dbgBeltLegibility, _dbgPropClientPoint, _dbgSleep, _dbgUseProp, _dbgArrive, _dbgLeisure,
+    loadStation, spawn, spawnAgent, despawnAgent, setOverlay, setSkin, relabel, setActivityFor, agentRunsLive, dropRun: noteRunEnd, focusBody, lockBody, cameraMode, setCinecamIdle, setChatFocus, chatFocusPing, start, stop, setActivity, wakeIn, beginAwakening, playArrival, cancelArrival, setWakeProgress, igniteSpark, armKindle, kindleHold, camPushIn, camCreep, camPunch, camPullBack, awakenTurn, truthPulse, beginFlood, collapseFlood, endAwakening, releaseAwakening, say, focusAgent, getActivity: () => activity, getUse: () => (agent ? agent.usingProp : null), setOnClick, setOnArcade, setOnOutbox, setOnMissionBoard, setOnTrophyCase, setOnBayAssign, setOnIntakeFeed, setOnIntakeSample, refit, pauseBridge, resumeBridge, linkState, _dbgSeedRun, _dbgAgeRun, _dbgReconcile, _dbgSweep, _dbgLinkState, _dbgDropBridge, _dbgCurveState, _dbgLoseCurveContext, _dbgLoseCanvases, _dbgCanvasLoss, _dbgKillStageContext, _dbgStageState, _dbgBeltLegibility, _dbgPropClientPoint, _dbgSleep, _dbgUseProp, _dbgArrive, _dbgLeisure,
     // AGENT GROWTH: XpStore pushes pre-computed Xp.compute() snapshots here; pulseLevelUp fires
     // the addressed body's gold ring. The colony headline is the top-bar STATION chip.
     setXp: (agentId, a) => {

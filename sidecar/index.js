@@ -9289,6 +9289,8 @@ const ROUTES = [
   { m: 'POST', exact: '/api/run/steer', h: handleRunSteer },
   { m: 'GET', exact: '/api/version', h: handleVersion },
   { m: 'GET', exact: '/api/stockblitz/board', h: handleStockBlitzBoard },   // StockBlitz fork: read-only work-board feed
+  { m: 'GET', exact: '/api/stockblitz/globe', h: handleStockBlitzGlobe },   // StockBlitz fork: compact world-twin data for the bridge hologram
+  { m: 'POST', exact: '/api/stockblitz/lane', h: handleStockBlitzLane },   // StockBlitz fork: pause/resume/priority/agent-now for one lane
   { m: 'GET', exact: '/api/diagnostics', h: handleDiagnostics },   // T3.9 paste-ready bug report
   { m: 'POST', exact: '/api/diagnostics/live', h: handleLiveDoctor }, // opt-in live model/execution/MCP/channel proof
   { m: 'POST', exact: '/api/halt', h: handleHalt },
@@ -18770,6 +18772,81 @@ async function handleStockBlitzBoard(req, res) {
   }
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(out));
+}
+
+// GET /api/stockblitz/globe — StockBlitz fork: a compact world-twin snapshot for the bridge hologram.
+// The dashboard's globe files are 10+ MB; this keeps country points, the largest trade arcs and the
+// shipping chokepoints, cached for ten minutes.
+let stockblitzGlobeCache = { at: 0, body: null };
+async function handleStockBlitzGlobe(req, res) {
+  const now = Date.now();
+  if (!stockblitzGlobeCache.body || now - stockblitzGlobeCache.at > 600000) {
+    const base = new URL(STOCKBLITZ_BOARD_URL).origin + '/';
+    const get = async name => {
+      const r = await fetch(base + name, { signal: AbortSignal.timeout(20000), cache: 'no-store' });
+      if (!r.ok) throw new Error(name + ' HTTP ' + r.status);
+      return r.json();
+    };
+    try {
+      const [world, trade, ships] = await Promise.all([
+        get('world_globe.json'), get('trade_globe.json').catch(() => null), get('ships_globe.json').catch(() => null),
+      ]);
+      const nodes = (world.nodes || []).filter(n => Number.isFinite(n.lat) && Number.isFinite(n.lon))
+        .map(n => ({ id: n.id, name: n.name, lat: n.lat, lon: n.lon, gdp: n.gdp_usd || 0 }));
+      const pos = new Map(nodes.map(n => [n.id, n]));
+      const latest = new Map();   // one arc per pair: its most recent year
+      for (const a of ((trade && (trade.arcs || trade.edges)) || [])) {
+        if (!pos.has(a.src) || !pos.has(a.dst) || a.src === a.dst) continue;
+        const key = a.src + '>' + a.dst, had = latest.get(key);
+        if (!had || (a.year || 0) > (had.year || 0)) latest.set(key, a);
+      }
+      const arcs = Array.from(latest.values())
+        .sort((a, b) => (b.to_usd || 0) - (a.to_usd || 0)).slice(0, 80)
+        .map(a => ({ src: a.src, dst: a.dst, usd: a.to_usd || 0 }));
+      const chokepoints = ((ships && ships.chokepoints) || []).map(c => ({ name: c.name, lat: c.lat, lon: c.lon }));
+      stockblitzGlobeCache = { at: now, body: JSON.stringify({ ok: true, nodes, arcs, chokepoints, generatedAt: world.generated_at || null }) };
+    } catch (e) {
+      if (!stockblitzGlobeCache.body) {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: false, error: 'world twin globe data unreachable' }));
+        return;
+      }
+    }
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(stockblitzGlobeCache.body);
+}
+
+// POST /api/stockblitz/lane — StockBlitz fork: steer one work-board lane from the station. Forwards an
+// owner patch to the dashboard's own /api/task-board (same-origin rules there), so the board stays the
+// single place lane priority and agent requests are decided. {id, action: pause|resume|priority|agent_now, value}
+async function handleStockBlitzLane(req, res) {
+  const json = (code, obj) => { res.writeHead(code, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(JSON.stringify(obj)); };
+  let body;
+  try { body = JSON.parse(await readBody(req, 1 << 14) || '{}') || {}; }
+  catch (_) { return json(400, { ok: false, error: 'bad json' }); }
+  const id = String(body.id || '');
+  if (!/^seq-[A-Za-z0-9_-]{1,60}$/.test(id)) return json(400, { ok: false, error: 'unknown lane' });
+  const clamp = v => Math.max(0, Math.min(100, Math.round(Number(v))));
+  let patch;
+  if (body.action === 'pause') patch = { priorities: { [id]: 0 } };
+  else if (body.action === 'resume') patch = { priorities: { [id]: Number.isFinite(+body.value) && +body.value > 0 ? clamp(body.value) : 50 } };
+  else if (body.action === 'priority' && Number.isFinite(+body.value)) patch = { priorities: { [id]: clamp(body.value) } };
+  else if (body.action === 'agent_now') patch = { agent_now: id };
+  else return json(400, { ok: false, error: 'unknown action' });
+  const origin = new URL(STOCKBLITZ_BOARD_URL).origin;
+  try {
+    const r = await fetch(STOCKBLITZ_BOARD_URL, {
+      method: 'POST', signal: AbortSignal.timeout(8000),
+      headers: { 'Content-Type': 'application/json', Origin: origin },
+      body: JSON.stringify(patch),
+    });
+    const text = await r.text();
+    if (!r.ok) return json(502, { ok: false, error: 'board refused: ' + text.slice(0, 200) });
+    return json(200, { ok: true });
+  } catch (e) {
+    return json(502, { ok: false, error: 'StockBlitz board unreachable' });
+  }
 }
 
 function handleVersion(req, res) {

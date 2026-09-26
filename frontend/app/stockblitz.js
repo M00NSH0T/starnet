@@ -167,20 +167,120 @@
     term.hidden = false;
   }
 
-  // The station's own mission board and trophy case open the matching dashboard sections.
+  // The station's own mission board and trophy case open the matching dashboard sections; the bridge
+  // hologram and the StockBlitz crew go through World.setOverlay.
   function bindProps() {
     const W = world();
     if (!W) return;
     const byHash = h => PLACES.find(p => p.hash === h);
     if (W.setOnMissionBoard) W.setOnMissionBoard(() => openTerminal(byHash('board')));
     if (W.setOnTrophyCase) W.setOnTrophyCase(() => openTerminal(byHash('latest')));
+    if (W.setOverlay) {
+      const globe = typeof StockBlitzGlobe !== 'undefined' ? StockBlitzGlobe : null;
+      W.setOverlay(
+        env => {
+          // The overlay only runs once the floor geometry exists, so crew spawned from here get real feet.
+          if (!floorReady) { floorReady = true; if (lastBoard) syncCrew(lastBoard); }
+          return globe ? globe.items(env, token()) : [];
+        },
+        (click) => {
+          if (click.agentId && String(click.agentId).startsWith('sb-')) { openLane(click.agentId); return true; }
+          if (!click.agentId && globe && globe.hit(click.wp)) { openTerminal(byHash('worldtwin')); return true; }
+          return false;
+        },
+      );
+    }
   }
+
+  // ---- lane control panel: click a StockBlitz crew member ----
+  let lanePanel = null;
+  let laneOpen = null;   // crew id currently shown
+  let laneMsg = '';      // survives the 5s repaint
+  const lanesById = new Map();   // crew id -> lane
+
+  async function laneAction(lane, action, value) {
+    const headers = { 'Content-Type': 'application/json' };
+    const tok = token();
+    if (tok) headers['X-StarNet-Token'] = tok;
+    const r = await fetch('/api/stockblitz/lane', { method: 'POST', headers, body: JSON.stringify({ id: lane.id, action, value }) });
+    const body = await r.json().catch(() => ({}));
+    if (!body.ok) throw new Error(body.error || 'the board refused');
+  }
+
+  function openLane(id) {
+    laneOpen = id;
+    laneMsg = '';
+    if (!lanePanel) {
+      lanePanel = el('div');
+      lanePanel.id = 'sb-lane';
+      lanePanel.setAttribute('role', 'dialog');
+      document.body.appendChild(lanePanel);
+      const style = el('style');
+      style.textContent = [
+        '#sb-lane{position:fixed;left:50%;top:14vh;transform:translateX(-50%);z-index:955;width:min(380px,92vw);',
+        'background:rgba(12,9,4,.95);border:1px solid #c98a2b;color:#f3d9a4;font:12px/1.5 ui-monospace,Consolas,monospace;padding:12px 14px;',
+        'box-shadow:0 0 24px rgba(0,0,0,.6)}#sb-lane[hidden]{display:none}',
+        '#sb-lane h4{margin:0 0 4px;color:#ffb547;font:700 12px ui-monospace,Consolas,monospace;letter-spacing:.1em}',
+        '#sb-lane p{margin:6px 0;color:#c9ad7c}#sb-lane .sb-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}',
+        '#sb-lane button{background:none;border:1px solid #c98a2b;color:#f3d9a4;font:inherit;cursor:pointer;padding:4px 8px}',
+        '#sb-lane button:hover{background:#2a1c08}#sb-lane button:focus-visible{outline:2px solid #ffb547}',
+        '#sb-lane .sb-msg{color:#7ad5c1;min-height:1.4em}',
+      ].join('');
+      document.head.appendChild(style);
+      document.addEventListener('keydown', e => { if (e.key === 'Escape' && lanePanel && !lanePanel.hidden) lanePanel.hidden = true; });
+    }
+    paintLane();
+    lanePanel.hidden = false;
+  }
+
+  function paintLane() {
+    if (!lanePanel || !laneOpen) return;
+    const lane = lanesById.get(laneOpen);
+    lanePanel.replaceChildren();
+    const close = el('button', null, '×');
+    close.style.float = 'right';
+    close.setAttribute('aria-label', 'Close lane');
+    close.onclick = () => { lanePanel.hidden = true; };
+    lanePanel.append(close);
+    if (!lane) { lanePanel.append(el('p', null, 'This lane is no longer on the floor.')); return; }
+    lanePanel.append(el('h4', null, lane.name.toUpperCase()));
+    lanePanel.append(el('p', null, lane.status + ' · ' + lane.layer + ' · priority ' + lane.priority));
+    if (lane.plain) lanePanel.append(el('p', null, lane.plain));
+    if (lane.note) lanePanel.append(el('p', null, 'Now: ' + lane.note));
+    const msg = el('div', 'sb-msg', laneMsg);
+    const say = t => { laneMsg = t; msg.textContent = t; };
+    const acts = el('div', 'sb-acts');
+    const act = (label, action, value, done) => {
+      const b = el('button', null, label);
+      b.onclick = async () => {
+        say('Sending…');
+        try { await laneAction(lane, action, value); say(done); poll(); }
+        catch (e) { say(e.message); }
+      };
+      acts.append(b);
+    };
+    if (lane.priority > 0) act('Pause', 'pause', null, 'Paused. The watchdog stops it on its next check.');
+    else act('Resume', 'resume', 50, 'Resumed at priority 50.');
+    act('Priority +10', 'priority', Math.min(100, lane.priority + 10), 'Priority raised.');
+    act('Priority −10', 'priority', Math.max(0, lane.priority - 10), 'Priority lowered.');
+    if (lane.layer === 'research') act('Put an agent on it now', 'agent_now', null, 'Requested. An agent picks it up within two minutes.');
+    lanePanel.append(acts, msg);
+    const dash = el('a', null, 'Open on the work board');
+    dash.href = DASHBOARD + '#board';
+    dash.style.cssText = 'display:inline-block;margin-top:8px;color:#ffb547';
+    lanePanel.append(dash);
+  }
+
+  let floorReady = false;   // spawning before the floor exists parks bodies at the origin, unplaced
+  let lastBoard = null;
 
   function syncCrew(data) {
     const W = world();
-    if (!W || !W.spawnAgent || !data || !data.ok) return;
+    if (data && data.ok) lastBoard = data;
+    if (!W || !W.spawnAgent || !data || !data.ok || !floorReady) return;
     const want = new Map();
-    data.lanes.forEach(l => { if (SHOWN[l.status]) want.set(crewId(l.id), l); });
+    lanesById.clear();
+    data.lanes.forEach(l => { lanesById.set(crewId(l.id), l); if (SHOWN[l.status]) want.set(crewId(l.id), l); });
     for (const [id, lane] of want) {
       const had = bodies.get(id);
       if (!had) {
@@ -210,6 +310,7 @@
     }
     try { syncCrew(data); } catch (e) { console.warn('[stockblitz] crew sync failed', e); }
     renderHud(data);
+    if (lanePanel && !lanePanel.hidden) paintLane();
   }
 
   function start() {
