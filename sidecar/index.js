@@ -18755,6 +18755,7 @@ async function handleStockBlitzBoard(req, res) {
     const b = await r.json();
     out = {
       ok: true,
+      dashboardUrl: new URL(STOCKBLITZ_BOARD_URL).origin + '/',
       generatedAt: b.generated_at || null,
       watchdog: b.watchdog ? { lastTick: b.watchdog.last_tick, live: !!b.watchdog.live, nextAction: b.watchdog.next_action || '' } : null,
       agents: b.agents || null,
