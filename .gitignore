@@ -210,3 +210,7 @@ sidecar/mcp/google-client.json
 /.local/google-review/
 
 src-tauri/frontend-embed/
+
+# StockBlitz fork: local station state and logs
+.stockblitz-workspaces*
+.stockblitz-sidecar.log

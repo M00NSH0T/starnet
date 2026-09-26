@@ -9288,6 +9288,7 @@ const ROUTES = [
   { m: 'POST', exact: '/api/cancel', h: handleCancel },
   { m: 'POST', exact: '/api/run/steer', h: handleRunSteer },
   { m: 'GET', exact: '/api/version', h: handleVersion },
+  { m: 'GET', exact: '/api/stockblitz/board', h: handleStockBlitzBoard },   // StockBlitz fork: read-only work-board feed
   { m: 'GET', exact: '/api/diagnostics', h: handleDiagnostics },   // T3.9 paste-ready bug report
   { m: 'POST', exact: '/api/diagnostics/live', h: handleLiveDoctor }, // opt-in live model/execution/MCP/channel proof
   { m: 'POST', exact: '/api/halt', h: handleHalt },
@@ -18742,6 +18743,34 @@ function computeVersionSurface() {
   _versionCache = out;
   return out;
 }
+// GET /api/stockblitz/board — StockBlitz fork: a READ-ONLY view of the StockBlitz work board so the
+// station can show its lanes as display-only crew. Loopback only (the board is served on this machine);
+// nothing here can start, stop, or edit StockBlitz work.
+const STOCKBLITZ_BOARD_URL = process.env.STOCKBLITZ_BOARD_URL || 'http://127.0.0.1:8765/api/task-board';
+async function handleStockBlitzBoard(req, res) {
+  let out;
+  try {
+    const r = await fetch(STOCKBLITZ_BOARD_URL, { signal: AbortSignal.timeout(5000), cache: 'no-store' });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const b = await r.json();
+    out = {
+      ok: true,
+      generatedAt: b.generated_at || null,
+      watchdog: b.watchdog ? { lastTick: b.watchdog.last_tick, live: !!b.watchdog.live, nextAction: b.watchdog.next_action || '' } : null,
+      agents: b.agents || null,
+      lanes: (b.sequences || []).map(s => ({
+        id: String(s.id || ''), name: String(s.name || s.id || ''), layer: String(s.layer || ''),
+        status: String(s.status || ''), note: String(s.note || ''), priority: Number(s.priority) || 0,
+        plain: String(s.plain_english || ''),
+      })),
+    };
+  } catch (e) {
+    out = { ok: false, error: 'StockBlitz board unreachable at ' + STOCKBLITZ_BOARD_URL };
+  }
+  res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+  res.end(JSON.stringify(out));
+}
+
 function handleVersion(req, res) {
   const out = computeVersionSurface();
   res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
